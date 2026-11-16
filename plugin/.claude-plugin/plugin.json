@@ -1,0 +1,9 @@
+{
+  "name": "chatrelay",
+  "version": "0.1.0",
+  "description": "Hand a conversation over to another AI, or pick one up from another AI, without losing anything.",
+  "author": { "name": "spencerrios64" },
+  "homepage": "https://spencerrios64.github.io/chatrelay/",
+  "repository": "https://github.com/spencerrios64/chatrelay",
+  "keywords": ["handoff", "continue chat", "switch AI", "context"]
+}
