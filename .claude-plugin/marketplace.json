@@ -1,0 +1,13 @@
+{
+  "name": "chatrelay",
+  "owner": {
+    "name": "spencerrios64"
+  },
+  "plugins": [
+    {
+      "name": "chatrelay",
+      "source": "./plugin",
+      "description": "Hand a conversation over to another AI, or pick one up from another AI, without losing anything."
+    }
+  ]
+}
