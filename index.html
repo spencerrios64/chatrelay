@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#7c3aed">
+<title>chatrelay</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fff; --fg:#1b1f24; --mut:#667085; --line:#d8dee4; --card:#f6f8fa; --acc:#7c3aed; --warn:#b45309; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0d1117; --fg:#e6edf3; --mut:#8b949e; --line:#30363d; --card:#161b22; --acc:#a78bfa; --warn:#fbbf24; } }
+  * { box-sizing: border-box; }
+  html, body { height:100%; }
+  body { margin:0 auto; max-width:820px; padding:12px; background:var(--bg); color:var(--fg); font:16px/1.5 system-ui, sans-serif; display:flex; flex-direction:column; }
+  h1 { font-size:1.3rem; margin:0; }
+  .mut { color:var(--mut); font-size:.85rem; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0; }
+  .bar label { font-size:.85rem; color:var(--mut); display:flex; flex-direction:column; gap:2px; }
+  button, select, input, textarea { font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; min-height:42px; }
+  button { background:var(--card); cursor:pointer; }
+  button.main { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  details { border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin:6px 0; }
+  summary { cursor:pointer; min-height:28px; }
+  .prov { display:grid; grid-template-columns:1fr 1fr auto; gap:6px; align-items:center; margin:10px 0; }
+  .prov b { grid-column:1 / -1; }
+  .prov small { grid-column:1 / -1; }
+  @media (max-width:560px) { .prov { grid-template-columns:1fr; } }
+  #chat { flex:1; overflow:auto; padding:4px 0; min-height:160px; }
+  .msg { margin:10px 0; padding:10px 12px; border:1px solid var(--line); border-radius:10px; white-space:pre-wrap; overflow-wrap:anywhere; }
+  .msg.user { background:var(--card); margin-left:12%; }
+  .msg.assistant { margin-right:6%; }
+  .msg small { display:block; color:var(--mut); margin-bottom:2px; }
+  .note { color:var(--warn); font-size:.85rem; margin:6px 2px; }
+  #form { display:flex; gap:8px; align-items:flex-end; padding-top:8px; }
+  #in { flex:1; resize:vertical; min-height:48px; max-height:40vh; }
+</style>
+</head>
+<body>
+<h1>chatrelay</h1>
+<p class="mut" style="margin:2px 0">One chat, several AIs. When one hits its limit, the next one continues with the whole conversation.</p>
+
+<details id="settings">
+  <summary>Settings: API keys and models</summary>
+  <p class="mut">Paste a key for each AI you want to use, press <b>Load models</b>, and pick a model. Keys are stored only in this browser and are sent only to that AI's own API. Paid APIs charge your account for each message.</p>
+  <div id="provs"></div>
+  <div class="bar"><button id="forget">Forget all keys</button></div>
+</details>
+
+<div class="bar">
+  <label>Chat with <select id="start"></select></label>
+  <label>Switch to the next AI when
+    <select id="mode">
+      <option value="both">it hits a limit or the chat is too long</option>
+      <option value="limit">it hits a usage limit or fails</option>
+      <option value="long">the chat is too long for it</option>
+    </select>
+  </label>
+  <button id="new">New chat</button>
+</div>
+
+<div id="chat" aria-live="polite"></div>
+<form id="form">
+  <textarea id="in" rows="2" placeholder="Type a message…" aria-label="Message"></textarea>
+  <button class="main" id="send">Send</button>
+</form>
+
+<script>
+// ---------------------------------------------------------------- core (no DOM)
+const PROVIDERS = [
+  { id: 'openai',     name: 'ChatGPT',    kind: 'openai',    base: 'https://api.openai.com/v1',                        site: 'https://platform.openai.com' },
+  { id: 'anthropic',  name: 'Claude',     kind: 'anthropic', base: 'https://api.anthropic.com/v1',                     site: 'https://console.anthropic.com' },
+  { id: 'gemini',     name: 'Gemini',     kind: 'gemini',    base: 'https://generativelanguage.googleapis.com/v1beta', site: 'https://aistudio.google.com' },
+  { id: 'groq',       name: 'Groq',       kind: 'openai',    base: 'https://api.groq.com/openai/v1',                   site: 'https://console.groq.com' },
+  { id: 'openrouter', name: 'OpenRouter', kind: 'openai',    base: 'https://openrouter.ai/api/v1',                     site: 'https://openrouter.ai' },
+  { id: 'deepseek',   name: 'DeepSeek',   kind: 'openai',    base: 'https://api.deepseek.com',                         site: 'https://platform.deepseek.com' },
+];
+
+const HANDOFF = 'You are continuing an ongoing conversation with the user. Earlier replies may have been written by a different AI assistant; ' +
+  'treat the whole history as your own conversation and carry on naturally without mentioning the change unless asked.';
+
+function headers(p, key) {
+  const h = { 'Content-Type': 'application/json' };
+  if (p.kind === 'anthropic') Object.assign(h, { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' });
+  else if (p.kind === 'gemini') h['x-goog-api-key'] = key;
+  else h.Authorization = 'Bearer ' + key;
+  return h;
+}
+
+// context: [{role: 'user'|'assistant', text}]
+function chatRequest(p, key, model, system, context) {
+  let url, body;
+  if (p.kind === 'anthropic') {
+    url = p.base + '/messages';
+    body = { model, max_tokens: 4096, system, messages: context.map(m => ({ role: m.role, content: m.text })) };
+  } else if (p.kind === 'gemini') {
+    url = `${p.base}/models/${encodeURIComponent(model.replace(/^models\//, ''))}:generateContent`;
+    body = { systemInstruction: { parts: [{ text: system }] },
+             contents: context.map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.text }] })) };
+  } else {
+    url = p.base + '/chat/completions';
+    body = { model, messages: [{ role: 'system', content: system }, ...context.map(m => ({ role: m.role, content: m.text }))] };
+  }
+  return { url, init: { method: 'POST', headers: headers(p, key), body: JSON.stringify(body) } };
+}
+
+function replyText(p, j) {
+  if (p.kind === 'anthropic') return (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  if (p.kind === 'gemini') return ((((j.candidates || [])[0] || {}).content || {}).parts || []).map(x => x.text || '').join('');
+  const c = ((j.choices || [])[0] || {}).message || {};
+  return typeof c.content === 'string' ? c.content : '';
+}
+
+function modelNames(p, j) {
+  if (p.kind === 'gemini') return (j.models || []).filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => m.name.replace(/^models\//, ''));
+  return (j.data || []).map(m => m.id)
+    .filter(id => !/embed|tts|whisper|audio|image|dall-e|moderation|realtime|transcri|sora|davinci|babbage|guard/i.test(id)).sort();
+}
+
+// Why a call failed: 'context' (chat too long), 'limit' (quota, rate limit, outage), 'auth' (bad key) or 'other'.
+function classify(status, text) {
+  if ([400, 413, 422].includes(status) && /context|too long|too large|maximum.{0,40}token|token limit|exceeds/i.test(text)) return 'context';
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 0 || status === 429 || status === 402 || status >= 500) return 'limit';
+  if (/quota|rate.?limit|credit|billing|overloaded|exhausted/i.test(text)) return 'limit';
+  return 'other';
+}
+
+// mode: 'both' | 'limit' | 'long'. A bad key or unknown error always moves on to the next AI.
+function shouldSwitch(kind, mode) {
+  if (kind === 'context') return mode !== 'limit';
+  if (kind === 'limit') return mode !== 'long';
+  return true;
+}
+
+const WHY = { context: 'says the chat is too long for it', limit: 'hit a usage limit or is unavailable', auth: 'rejected the API key', other: 'returned an error' };
+
+async function callOnce(p, cfg, system, context, fetchFn) {
+  const { url, init } = chatRequest(p, cfg.key, cfg.model, system, context);
+  let res, raw;
+  try { res = await fetchFn(url, init); raw = await res.text(); }
+  catch (e) { return { ok: false, kind: 'limit', detail: 'could not be reached' }; }
+  let j = null;
+  try { j = JSON.parse(raw); } catch (e) {}
+  if (!res.ok) {
+    const err = j && j.error;
+    const msg = (err && (err.message || (typeof err === 'string' ? err : ''))) || raw.slice(0, 200);
+    return { ok: false, kind: classify(res.status, raw), detail: `${res.status} ${msg}`.slice(0, 220) };
+  }
+  const text = j ? replyText(p, j).trim() : '';
+  return text ? { ok: true, text } : { ok: false, kind: 'other', detail: 'empty reply' };
+}
+
+// Tries each provider in order until one answers. events lists every failure on the way.
+async function sendWithFailover({ providers, cfg, mode, system, context, fetchFn }) {
+  const events = [];
+  for (const p of providers) {
+    const r = await callOnce(p, cfg[p.id], system, context, fetchFn);
+    if (r.ok) return { ok: true, provider: p, text: r.text, events };
+    events.push({ provider: p, kind: r.kind, detail: r.detail });
+    if (!shouldSwitch(r.kind, mode)) break;
+  }
+  return { ok: false, events, allContext: events.length > 0 && events.every(e => e.kind === 'context') };
+}
+
+function contextOf(messages, summary) {
+  return messages.slice(summary ? summary.upto : 0).filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({ role: m.role, text: m.text }));
+}
+function systemOf(summary) {
+  return HANDOFF + (summary ? '\n\nSummary of the earlier part of this conversation:\n' + summary.text : '');
+}
+
+// Picks where to cut for a summary: roughly the older half, ending just before a user message. -1 if nothing to cut.
+function cutPoint(messages, from) {
+  const total = messages.slice(from).reduce((n, m) => n + (m.role === 'note' ? 0 : m.text.length), 0);
+  let seen = 0;
+  for (let i = from; i < messages.length - 1; i++) {
+    if (messages[i].role !== 'note') seen += messages[i].text.length;
+    if (seen >= total / 2 && messages[i + 1].role === 'user' && i + 1 > from) return i + 1;
+  }
+  return -1;
+}
+
+if (typeof module !== 'undefined') module.exports = { PROVIDERS, chatRequest, replyText, modelNames, classify, shouldSwitch, sendWithFailover, contextOf, systemOf, cutPoint };
+
+// ---------------------------------------------------------------- page
+if (typeof document !== 'undefined') {
+  const $ = id => document.getElementById(id);
+  const el = (tag, props, ...kids) => { const n = Object.assign(document.createElement(tag), props || {}); n.append(...kids); return n; };
+  const blank = () => ({ cfg: {}, start: '', mode: 'both', messages: [], summary: null });
+  let S = blank(), busy = false;
+  try { S = Object.assign(blank(), JSON.parse(localStorage.getItem('chatrelay') || '{}')); } catch (e) {}
+  const save = () => { try { localStorage.setItem('chatrelay', JSON.stringify(S)); } catch (e) {} };
+  const byId = id => PROVIDERS.find(p => p.id === id);
+  const ready = () => PROVIDERS.filter(p => S.cfg[p.id] && S.cfg[p.id].key && S.cfg[p.id].model);
+  const ordered = () => { const r = ready(), i = Math.max(0, r.findIndex(p => p.id === S.start)); return [...r.slice(i), ...r.slice(0, i)]; };
+
+  function renderChat() {
+    $('chat').replaceChildren(...S.messages.map(m => m.role === 'note'
+      ? el('div', { className: 'note', textContent: m.text })
+      : el('div', { className: 'msg ' + m.role }, el('small', { textContent: m.role === 'user' ? 'You' : (byId(m.ai) || {}).name || 'AI' }), m.text)));
+    if (!S.messages.length) $('chat').append(el('p', { className: 'mut', textContent: ready().length ? 'Say something to start.' : 'Open Settings and add at least one API key to start.' }));
+    $('chat').scrollTop = $('chat').scrollHeight;
+  }
+  const note = text => { S.messages.push({ role: 'note', text }); renderChat(); };
+
+  function renderStart() {
+    const r = ready();
+    if (!r.some(p => p.id === S.start)) S.start = r.length ? r[0].id : '';
+    $('start').replaceChildren(...(r.length ? r.map(p => el('option', { value: p.id, textContent: `${p.name} (${S.cfg[p.id].model})`, selected: p.id === S.start }))
+                                            : [el('option', { textContent: 'no AI set up yet' })]));
+  }
+
+  function renderSettings() {
+    $('provs').replaceChildren(...PROVIDERS.map(p => {
+      const c = S.cfg[p.id] || (S.cfg[p.id] = { key: '', model: '', models: [] });
+      const status = el('small', { className: 'mut' });
+      const key = el('input', { type: 'password', placeholder: `${p.name} API key`, value: c.key, autocomplete: 'off' });
+      key.setAttribute('aria-label', `${p.name} API key`);
+      const model = el('select');
+      model.setAttribute('aria-label', `${p.name} model`);
+      const fill = () => model.replaceChildren(...(c.models.length ? c.models.map(m => el('option', { value: m, textContent: m, selected: m === c.model }))
+                                                                    : [el('option', { value: '', textContent: 'no models loaded' })]));
+      fill();
+      const load = el('button', { type: 'button', textContent: 'Load models' });
+      key.onchange = () => { c.key = key.value.trim(); save(); renderStart(); };
+      model.onchange = () => { c.model = model.value; save(); renderStart(); };
+      load.onclick = async () => {
+        c.key = key.value.trim();
+        if (!c.key) { status.textContent = 'Paste the key first.'; return; }
+        status.textContent = 'Loading…';
+        try {
+          const res = await fetch(p.base + (p.kind === 'gemini' ? '/models?pageSize=200' : '/models'), { headers: headers(p, c.key) });
+          if (!res.ok) throw new Error(res.status === 401 || res.status === 403 ? 'the key was rejected' : 'error ' + res.status);
+          c.models = modelNames(p, await res.json());
+          if (!c.models.includes(c.model)) c.model = c.models[0] || '';
+          status.textContent = c.models.length ? `${c.models.length} models. Pick one.` : 'No chat models found for this key.';
+        } catch (e) { status.textContent = `Couldn't load models: ${e.message}.`; }
+        fill(); save(); renderStart(); renderChat();
+      };
+      return el('div', { className: 'prov' }, el('b', {}, p.name + ' ', el('a', { href: p.site, target: '_blank', rel: 'noopener', className: 'mut', textContent: 'get a key' })), key, model, load, status);
+    }));
+  }
+
+  const attempt = () => sendWithFailover({ providers: ordered(), cfg: S.cfg, mode: S.mode, system: systemOf(S.summary),
+                                           context: contextOf(S.messages, S.summary), fetchFn: (u, i) => fetch(u, i) });
+
+  // Every AI said the chat is too long: fold the oldest half into a summary so the chat can go on.
+  async function compact() {
+    const from = S.summary ? S.summary.upto : 0, cut = cutPoint(S.messages, from);
+    if (cut < 0) return false;
+    const old = S.messages.slice(from, cut).filter(m => m.role !== 'note').map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.text}`).join('\n\n');
+    const ask = (S.summary ? 'Summary so far:\n' + S.summary.text + '\n\n' : '') + 'Conversation to add:\n' + old +
+      '\n\nWrite one detailed summary of everything above. Keep every fact, name, number, decision, preference and any code or text needed to continue the conversation.';
+    const r = await sendWithFailover({ providers: ordered(), cfg: S.cfg, mode: 'both', system: 'You compress conversations without losing information.',
+                                       context: [{ role: 'user', text: ask }], fetchFn: (u, i) => fetch(u, i) });
+    if (!r.ok) return false;
+    S.summary = { text: r.text, upto: cut };
+    return true;
+  }
+
+  async function send() {
+    const text = $('in').value.trim();
+    if (!text || busy) return;
+    if (!ready().length) { $('settings').open = true; note('Add at least one API key and pick a model in Settings first.'); return; }
+    busy = true; $('send').disabled = true; $('in').value = '';
+    S.messages.push({ role: 'user', text }); renderChat();
+    const first = ordered()[0];
+    let r = await attempt();
+    if (!r.ok && r.allContext && S.mode !== 'limit') {
+      note('The chat is too long for every AI. Summarising the oldest part so it can continue…');
+      if (await compact()) r = await attempt();
+    }
+    for (const e of r.events) note(`${e.provider.name} ${WHY[e.kind]} (${e.detail}).`);
+    if (r.ok) {
+      if (r.provider.id !== first.id) { note(`Switched to ${r.provider.name}. It has the whole conversation.`); S.start = r.provider.id; renderStart(); }
+      S.messages.push({ role: 'assistant', text: r.text, ai: r.provider.id });
+    } else {
+      note(r.events.length > 1 || ready().length === 1 ? 'No AI could answer. Your message is kept; fix the problem above and send again.'
+                                                       : 'Not switching because of your "Switch when" setting. Your message is kept.');
+    }
+    busy = false; $('send').disabled = false; save(); renderChat(); $('in').focus();
+  }
+
+  $('form').onsubmit = ev => { ev.preventDefault(); send(); };
+  $('in').onkeydown = ev => { if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); } };
+  $('start').onchange = () => { S.start = $('start').value; save(); };
+  $('mode').value = S.mode;
+  $('mode').onchange = () => { S.mode = $('mode').value; save(); };
+  $('new').onclick = () => { if (!S.messages.length || confirm('Start a new chat? The current one will be cleared.')) { S.messages = []; S.summary = null; save(); renderChat(); } };
+  $('forget').onclick = () => { if (confirm('Remove every saved API key from this browser?')) { S.cfg = {}; save(); renderSettings(); renderStart(); renderChat(); } };
+
+  renderSettings(); renderStart(); renderChat();
+  if (!ready().length) $('settings').open = true;
+}
+</script>
+</body>
+</html>
