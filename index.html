@@ -33,6 +33,7 @@
   .note { color:var(--warn); font-size:.85rem; margin:6px 2px; }
   #form { display:flex; gap:8px; align-items:flex-end; padding-top:8px; }
   #in { flex:1; resize:vertical; min-height:48px; max-height:40vh; }
+#clist{max-height:230px;overflow:auto;margin:6px 0}.crow{display:flex;gap:6px;margin:4px 0}.ci{flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ci.cur{font-weight:700;border-width:2px}#chats{margin:8px 0}
 </style>
 </head>
 <body>
@@ -57,6 +58,13 @@
   </label>
   <button id="new">New chat</button>
 </div>
+
+<details id="chats" open>
+  <summary>Saved chats (<span id="cc">0</span>)</summary>
+  <div id="clist"></div>
+  <div class="bar"><button id="new2" type="button">+ New chat</button><button id="exp" type="button">Export this chat</button><button id="expall" type="button">Export all</button><button id="imp" type="button">Import</button></div>
+  <p class="mut" style="margin:2px 0">Chats are saved automatically in this browser. Use Export all to keep a backup.</p>
+</details>
 
 <div id="chat" aria-live="polite"></div>
 <form id="form">
@@ -191,7 +199,29 @@ if (typeof document !== 'undefined') {
   const blank = () => ({ cfg: {}, start: '', mode: 'both', messages: [], summary: null });
   let S = blank(), busy = false;
   try { S = Object.assign(blank(), JSON.parse(localStorage.getItem('chatrelay') || '{}')); } catch (e) {}
-  const save = () => { try { localStorage.setItem('chatrelay', JSON.stringify(S)); } catch (e) {} };
+  const save = () => {
+    syncCur();
+    try {
+      const r = Object.assign({}, S); delete r.messages; delete r.summary;
+      localStorage.setItem('chatrelay', JSON.stringify(r));
+      localStorage.setItem('chatrelay_chats', JSON.stringify(L));
+    } catch (e) { if (!save.warned) { save.warned = true; alert('Browser storage is full, so this chat may not be saved. Export your chats and delete old ones.'); } }
+  };
+  // ---- saved chats: a library of chats; S.messages / S.summary always mirror the open one
+  let L = { list: [], cur: '' };
+  try { L = Object.assign(L, JSON.parse(localStorage.getItem('chatrelay_chats') || '{}')); } catch (e) {}
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const emptyChat = () => ({ id: uid(), title: 'New chat', updated: Date.now(), messages: [], summary: null, start: S.start });
+  const curChat = () => L.list.find(c => c.id === L.cur);
+  function syncCur() {
+    const c = curChat(); if (!c) return;
+    c.messages = S.messages; c.summary = S.summary; c.start = S.start;
+    if (!c.userTitle) { const f = S.messages.find(m => m.role === 'user'); c.title = f ? f.text.replace(/\s+/g, ' ').slice(0, 48) : 'New chat'; }
+    if (S.messages.length) c.updated = Date.now();
+  }
+  if (!Array.isArray(L.list) || !L.list.length) { const c = emptyChat(); c.messages = S.messages || []; c.summary = S.summary || null; L = { list: [c], cur: c.id }; }
+  if (!curChat()) L.cur = L.list[0].id;
+  { const c = curChat(); S.messages = c.messages || []; S.summary = c.summary || null; }
   const byId = id => PROVIDERS.find(p => p.id === id);
   const ready = () => PROVIDERS.filter(p => S.cfg[p.id] && S.cfg[p.id].key && S.cfg[p.id].model);
   const ordered = () => { const r = ready(), i = Math.max(0, r.findIndex(p => p.id === S.start)); return [...r.slice(i), ...r.slice(0, i)]; };
@@ -265,7 +295,7 @@ if (typeof document !== 'undefined') {
     if (!text || busy) return;
     if (!ready().length) { $('settings').open = true; note('Add at least one API key and pick a model in Settings first.'); return; }
     busy = true; $('send').disabled = true; $('in').value = '';
-    S.messages.push({ role: 'user', text }); renderChat();
+    S.messages.push({ role: 'user', text }); save(); renderChats(); renderChat();
     const first = ordered()[0];
     let r = await attempt();
     if (!r.ok && r.allContext && S.mode !== 'limit') {
@@ -280,18 +310,77 @@ if (typeof document !== 'undefined') {
       note(r.events.length > 1 || ready().length === 1 ? 'No AI could answer. Your message is kept; fix the problem above and send again.'
                                                        : 'Not switching because of your "Switch when" setting. Your message is kept.');
     }
-    busy = false; $('send').disabled = false; save(); renderChat(); $('in').focus();
+    busy = false; $('send').disabled = false; save(); renderChat(); renderChats(); $('in').focus();
   }
+
+  function renderChats() {
+    syncCur();
+    const items = L.list.slice().sort((a, b) => b.updated - a.updated);
+    $('cc').textContent = items.length;
+    $('clist').replaceChildren(...items.map(c => {
+      const n = c.messages.filter(m => m.role !== 'note').length;
+      const open = el('button', { type: 'button', className: 'ci' + (c.id === L.cur ? ' cur' : ''), textContent: c.title + (n ? '  (' + n + ')' : ''), title: new Date(c.updated).toLocaleString() });
+      open.onclick = () => openChat(c.id);
+      const ren = el('button', { type: 'button', textContent: 'Rename' });
+      ren.onclick = () => { const nm = prompt('Chat name', c.title); if (nm && nm.trim()) { c.title = nm.trim().slice(0, 80); c.userTitle = true; save(); renderChats(); } };
+      const del = el('button', { type: 'button', textContent: 'Delete' });
+      del.onclick = () => deleteChat(c.id);
+      return el('div', { className: 'crow' }, open, ren, del);
+    }));
+  }
+  function openChat(id) {
+    if (busy || id === L.cur) return;
+    syncCur(); L.cur = id; const c = curChat();
+    S.messages = c.messages; S.summary = c.summary;
+    if (c.start && ready().some(p => p.id === c.start)) S.start = c.start;
+    save(); renderStart(); renderChat(); renderChats();
+  }
+  function newChat() {
+    if (busy) return;
+    syncCur(); const c = curChat();
+    if (c && !c.messages.length) { $('in').focus(); return; }
+    const n = emptyChat(); L.list.push(n); L.cur = n.id; S.messages = []; S.summary = null;
+    save(); renderChat(); renderChats(); $('in').focus();
+  }
+  function deleteChat(id) {
+    if (busy) return;
+    const c = L.list.find(x => x.id === id);
+    if (!c || !confirm('Delete "' + c.title + '"? This cannot be undone.')) return;
+    L.list = L.list.filter(x => x.id !== id);
+    if (!L.list.length) L.list.push(emptyChat());
+    if (L.cur === id) { L.cur = L.list.slice().sort((a, b) => b.updated - a.updated)[0].id; const n = curChat(); S.messages = n.messages; S.summary = n.summary; }
+    save(); renderChat(); renderChats();
+  }
+  const download = (name, text, type) => { const a = el('a', { href: URL.createObjectURL(new Blob([text], { type })), download: name }); document.body.append(a); a.click(); a.remove(); };
+  $('exp').onclick = () => {
+    syncCur(); const c = curChat();
+    const md = '# ' + c.title + '\n\n' + c.messages.filter(m => m.role !== 'note').map(m => '**' + (m.role === 'user' ? 'You' : (byId(m.ai) || {}).name || 'AI') + ':** ' + m.text).join('\n\n') + '\n';
+    download((c.title.replace(/[^\w -]+/g, '').trim() || 'chat') + '.md', md, 'text/markdown');
+  };
+  $('expall').onclick = () => { syncCur(); download('chatrelay-chats.json', JSON.stringify({ chatrelay: 1, chats: L.list }), 'application/json'); };
+  $('imp').onclick = () => {
+    const f = document.createElement('input'); f.type = 'file'; f.accept = '.json';
+    f.onchange = async () => {
+      try {
+        const j = JSON.parse(await f.files[0].text());
+        const add = (j.chats || []).filter(c => c && Array.isArray(c.messages));
+        add.forEach(c => L.list.push({ id: uid(), title: c.title || 'Imported chat', userTitle: true, updated: c.updated || Date.now(), messages: c.messages, summary: c.summary || null, start: c.start }));
+        save(); renderChats(); alert(add.length + ' chat(s) imported.');
+      } catch (e) { alert('That file is not a chatrelay export.'); }
+    };
+    f.click();
+  };
+  $('new2').onclick = () => newChat();
 
   $('form').onsubmit = ev => { ev.preventDefault(); send(); };
   $('in').onkeydown = ev => { if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); send(); } };
   $('start').onchange = () => { S.start = $('start').value; save(); };
   $('mode').value = S.mode;
   $('mode').onchange = () => { S.mode = $('mode').value; save(); };
-  $('new').onclick = () => { if (!S.messages.length || confirm('Start a new chat? The current one will be cleared.')) { S.messages = []; S.summary = null; save(); renderChat(); } };
+  $('new').onclick = () => newChat();
   $('forget').onclick = () => { if (confirm('Remove every saved API key from this browser?')) { S.cfg = {}; save(); renderSettings(); renderStart(); renderChat(); } };
 
-  renderSettings(); renderStart(); renderChat();
+  renderSettings(); renderStart(); renderChat(); save(); renderChats();
   if (!ready().length) $('settings').open = true;
 }
 </script>
