@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // chatrelay-mcp.mjs - chatrelay as an MCP server: one chat, several AIs, automatic failover.
 // When the first AI hits a limit or goes down, the next one continues with the whole conversation.
+// Conversations are saved to chatrelay.chats.json (override with CHATRELAY_CHATS) and survive restarts.
 //
 //   stdio (Claude Desktop, Cursor, ...):  node chatrelay-mcp.mjs
 //   HTTP  (chatbridge, browsers):         node chatrelay-mcp.mjs --http 3940    ->  http://localhost:3940/mcp
@@ -22,6 +23,14 @@ const providers = (cfg.providers || []).map((p, i) => ({
 function resolveKey(k) { return !k ? '' : k.startsWith('env:') ? (process.env[k.slice(4)] || '') : k; }
 
 const convos = new Map(); // conversation id -> [{role, content}]
+const meta = new Map();   // conversation id -> {title, updated}
+const chatsFile = process.env.CHATRELAY_CHATS || cfg.chatsFile || 'chatrelay.chats.json';
+const titleOf = (id, ms) => (meta.get(id) || {}).title || (ms.find(m => m.role === 'user') || { content: 'New chat' }).content.replace(/\s+/g, ' ').slice(0, 48);
+try { const d = JSON.parse(fs.readFileSync(chatsFile, 'utf8')); for (const [id, c] of Object.entries(d)) { convos.set(id, c.messages || []); meta.set(id, { title: c.title, updated: c.updated }); } } catch (e) { /* first run: nothing saved yet */ }
+function persist() {
+  const d = {}; for (const [id, messages] of convos) d[id] = { title: titleOf(id, messages), updated: (meta.get(id) || {}).updated || Date.now(), messages };
+  try { fs.writeFileSync(chatsFile, JSON.stringify(d, null, 1)); } catch (e) { console.error('chatrelay-mcp: could not save chats: ' + e.message); }
+}
 const COOLDOWN_MS = (cfg.cooldownSeconds || 60) * 1000;
 
 async function callProvider(p, system, history) {
@@ -62,7 +71,7 @@ async function doRelay(message, id, system) {
   for (const p of order) {
     try {
       const text = await callProvider(p, system, history);
-      history.push({ role: 'assistant', content: text }); convos.set(id, history); p.used++; p.lastError = '';
+      history.push({ role: 'assistant', content: text }); convos.set(id, history); p.used++; p.lastError = ''; meta.set(id, Object.assign(meta.get(id) || {}, { updated: Date.now() })); persist();
       return { text, provider: p.name, model: p.model, switched: tried.length ? tried : undefined };
     } catch (e) {
       const msg = (e.name === 'AbortError' ? 'timeout' : e.message);
@@ -77,7 +86,9 @@ const TOOLS = [
   { name: 'relay_chat', description: 'Send a message in a persistent conversation. Tries the configured AIs in order and switches to the next if one hits a limit or fails, keeping the whole conversation.',
     inputSchema: { type: 'object', properties: { message: { type: 'string' }, conversation_id: { type: 'string', description: 'Keep the same id to continue a conversation (default "default").' }, system: { type: 'string', description: 'Optional system prompt.' } }, required: ['message'] } },
   { name: 'relay_providers', description: 'List the configured AIs, which are available, and recent errors.', inputSchema: { type: 'object', properties: {} } },
-  { name: 'relay_reset', description: 'Forget a conversation.', inputSchema: { type: 'object', properties: { conversation_id: { type: 'string' } } } },
+  { name: 'relay_conversations', description: 'List the saved conversations (id, title, size). Pass an id as conversation_id to relay_chat to continue one.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'relay_new', description: 'Start a new saved conversation and return its id.', inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
+  { name: 'relay_reset', description: 'Delete a saved conversation.', inputSchema: { type: 'object', properties: { conversation_id: { type: 'string' } } } },
 ];
 
 async function callTool(name, a) {
@@ -89,7 +100,9 @@ async function callTool(name, a) {
     const now = Date.now();
     return providers.map((p, i) => (i + 1) + '. ' + p.name + ' (' + p.type + ', ' + p.model + ') ' + (p.cooldownUntil > now ? 'cooling down ' + Math.ceil((p.cooldownUntil - now) / 1000) + 's' : 'available') + ', used ' + p.used + 'x' + (p.lastError ? ', last error: ' + p.lastError.slice(0, 100) : '')).join('\n') || 'No providers configured.';
   }
-  if (name === 'relay_reset') { convos.delete(a.conversation_id || 'default'); return 'conversation cleared'; }
+  if (name === 'relay_conversations') return [...convos].map(([id, ms]) => id + ' - ' + titleOf(id, ms) + ' (' + ms.length + ' messages)').join('\n') || 'No saved conversations yet.';
+  if (name === 'relay_new') { const id = 'chat-' + Date.now().toString(36); convos.set(id, []); meta.set(id, { title: a.title, updated: Date.now() }); persist(); return id; }
+  if (name === 'relay_reset') { const id = a.conversation_id || 'default'; convos.delete(id); meta.delete(id); persist(); return 'conversation deleted'; }
   throw new Error('Unknown tool ' + name);
 }
 
