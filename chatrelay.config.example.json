@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to chatrelay.config.json. Providers are tried in order; apiKey can be a literal or env:NAME to read an environment variable.",
+  "cooldownSeconds": 60,
+  "providers": [
+    {
+      "name": "local",
+      "type": "openai",
+      "baseUrl": "http://localhost:11434/v1",
+      "model": "hf.co/RootMonsteR/Qwen3-14B-Abliterated-GGUF:Q4_K_M"
+    },
+    {
+      "name": "claude",
+      "type": "anthropic",
+      "model": "claude-sonnet-4-5",
+      "apiKey": "env:ANTHROPIC_API_KEY"
+    },
+    {
+      "name": "openai",
+      "type": "openai",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-4o-mini",
+      "apiKey": "env:OPENAI_API_KEY"
+    }
+  ]
+}
