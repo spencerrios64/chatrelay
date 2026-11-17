@@ -56,3 +56,10 @@ The web page can't be an MCP server, so chatrelay also ships as a small helper, 
 3. Tools it provides: \`relay_chat\` (send a message; keeps the conversation and fails over between AIs), \`relay_providers\` (which AIs are available and recent errors) and \`relay_reset\`.
 
 Needs Node 18+ and no packages. A provider that fails is skipped for \`cooldownSeconds\` (default 60) so later messages don't wait on it. Conversations are kept in memory only.
+
+
+## Saved chats
+
+The web page keeps a library of chats: **New chat** starts a fresh one, click any chat to reopen it, rename or delete from the list, and chats auto-title from your first message. **Export all** downloads a JSON backup and **Import** restores it. Chats live in your browser's localStorage (per site, with a size limit), so use Export all as your backup.
+
+The MCP helper saves conversations to `chatrelay.chats.json` (change with `CHATRELAY_CHATS`) so they survive restarts. New tools: `relay_conversations` lists them, `relay_new` starts one, and `relay_reset` deletes one. Pass a `conversation_id` to `relay_chat` to continue a saved chat.
