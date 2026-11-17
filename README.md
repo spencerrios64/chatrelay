@@ -42,3 +42,17 @@ There is no separate .exe.
   APIs have not been tested with live keys yet, and a provider may block direct
   browser calls; if one never connects, open an issue.
 - Replies are plain text (no markdown rendering) and arrive all at once (no streaming).
+
+## Use chatrelay over MCP
+
+The web page can't be an MCP server, so chatrelay also ships as a small helper, \`chatrelay-mcp.mjs\`, that gives any MCP client the same failover: one conversation, several AIs, and the next AI takes over when one hits a limit.
+
+1. Copy \`chatrelay.config.example.json\` to \`chatrelay.config.json\` and list your AIs in the order to try them (local models, Claude, OpenAI, anything OpenAI-compatible). Keys can be \`env:NAME\` to read an environment variable.
+2. Add it to your MCP client. For Claude Desktop or Cursor (stdio):
+
+       { "mcpServers": { "chatrelay": { "command": "node", "args": ["C:/path/to/chatrelay-mcp.mjs"], "env": { "CHATRELAY_CONFIG": "C:/path/to/chatrelay.config.json" } } } }
+
+   For browser tools such as [chatbridge](https://spencerrios64.github.io/chatbridge/): run \`node chatrelay-mcp.mjs --http 3940\` and connect to \`http://localhost:3940/mcp\`.
+3. Tools it provides: \`relay_chat\` (send a message; keeps the conversation and fails over between AIs), \`relay_providers\` (which AIs are available and recent errors) and \`relay_reset\`.
+
+Needs Node 18+ and no packages. A provider that fails is skipped for \`cooldownSeconds\` (default 60) so later messages don't wait on it. Conversations are kept in memory only.
